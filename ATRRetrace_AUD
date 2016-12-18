@@ -1,0 +1,415 @@
+//+------------------------------------------------------------------+
+//|                                            ATRRetrace_AUDUSD.mq4 |
+//|                        Copyright 2016, MetaQuotes Software Corp. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2016, MetaQuotes Software Corp."
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property strict
+
+
+#include <stdlib.mqh>
+ 
+input bool UseTrailingStop = true;
+input bool DynamicLotSize = true;
+input double EquityPercent = 2;
+input double FixedLotSize = 0.01;
+
+input double InitialStopLoss = 10;
+input double TrailingStop = 16;
+
+input double TakeProfit = 22;
+input double MinimumProfit = 10;
+
+// Inputs for trading hours 
+// Server time is 2 hours ahead of London 
+input int HourToStartTrading = 22; 
+input int HourToEndTrading = 24; 
+ 
+input double MultiplyFactor = 1.3;
+
+input int Slippage = 5;
+input int MagicNumber = 123;
+
+// sets the speed of the visual backtest progression
+input int BacktestSpeed = 100; 
+
+int BuyTicket;
+int SellTicket;
+   
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+//---
+   
+//---
+   return(INIT_SUCCEEDED);
+  }
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+  ObjectsDeleteAll();
+//---
+   
+  }
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick() {
+
+  // slows the visual backtest speed
+  if(IsVisualMode()==true) {
+
+    int Waitloop = 0;
+    while(Waitloop < BacktestSpeed){
+      Comment("Wait Loop Count = ", Waitloop); 
+      Waitloop ++;
+    }
+  }
+  
+  double LotSize;
+  
+  // remove all existing objects before new ones are created  
+  ObjectsDeleteAll(0, OBJ_HLINE);
+  
+  // calculate lot size on account equity    
+  if (DynamicLotSize == true) {
+    double RiskAmount = AccountEquity() * (EquityPercent / 100);
+    double TickValue = MarketInfo(Symbol(), MODE_TICKVALUE);
+    if (Point == 0.001 || Point == 0.00001) {
+      TickValue *= 10;
+    }
+    double CalcLots = (RiskAmount / InitialStopLoss) / TickValue;
+    LotSize = CalcLots;
+  } else {
+      LotSize = FixedLotSize;
+  }
+      
+  // Establish new variables 
+      
+  // Establish ATRs
+  double FivePeriodATRToday = iATR(NULL, PERIOD_D1, 5, 0);
+  double TwentyPeriodATRToday = iATR(NULL, PERIOD_D1, 20, 0);
+      
+  // Daily Opens
+  double TodayOpen = iOpen(NULL, PERIOD_D1, 0);
+      
+  // Daily High and Low
+  double TodayHigh = iHigh(NULL, PERIOD_D1, 0);
+  double TodayLow = iLow(NULL, PERIOD_D1, 0);
+
+  // Today's ATR levels
+  // 5 period ATRs
+  double Upper5ATRToday = TodayOpen + FivePeriodATRToday;
+  double Lower5ATRToday = TodayOpen - FivePeriodATRToday;
+
+  // 20 period ATRs
+  double Upper20ATRToday = TodayOpen + TwentyPeriodATRToday;
+  double Lower20ATRToday = TodayOpen - TwentyPeriodATRToday;
+    
+  // Trigger lines 
+  // difference between RideTheRetrace and ATRRetrace is that in the ATRRetrace (this EA)
+  // the trigger high and low are the ATR lines with no Multiply Factor
+  
+  double TriggerHigh;
+  double TriggerLow;
+  
+  /*
+  TriggerHigh = TodayLow + (((FivePeriodATRToday + TwentyPeriodATRToday) / 2) * MultiplyFactor);
+  TriggerLow = TodayHigh - (((FivePeriodATRToday + TwentyPeriodATRToday) / 2) * MultiplyFactor);
+  */
+  
+  // ATR level furtherest from price is used
+  if (FivePeriodATRToday > TwentyPeriodATRToday) {
+  
+    TriggerHigh = TodayLow + (FivePeriodATRToday * MultiplyFactor); 
+    TriggerLow = TodayHigh - (FivePeriodATRToday * MultiplyFactor);
+
+  } else {
+  // TwentyPeriodTATR > FivePeriodATR
+    TriggerHigh = TodayLow + (TwentyPeriodATRToday * MultiplyFactor); 
+    TriggerLow = TodayHigh - (TwentyPeriodATRToday * MultiplyFactor);
+  }
+
+      
+  // Draw trigger lines 
+  ObjectCreate("Trigger High",OBJ_HLINE,0,D'2004.02.20 12:30', TriggerHigh);
+  ObjectSet("Trigger High", OBJPROP_COLOR, clrOrange);
+      
+  ObjectCreate("TriggerLow",OBJ_HLINE,0,D'2004.02.20 12:30', TriggerLow);
+  ObjectSet("TriggerLow", OBJPROP_COLOR, clrGreen);
+      
+  RefreshRates();
+  
+  datetime now = TimeCurrent();
+  int time = TimeHour(TimeCurrent());
+  
+  bool CanTrade = BetweenTradingHours(HourToStartTrading, HourToEndTrading);
+  
+  if (CanTrade) {
+    Comment("Current Time: ",now, 
+            "\n", "Current Hour: ", time,
+            "\n", "Inside Trading Hours");
+  } else {
+    Comment("Current Time: ",now, 
+            "\n", "Current Hour: ", time,
+            "\n", "Outside Trading Hours");
+  
+  }
+      
+  // call functions to update trailing stops on live trades    
+  if (UseTrailingStop == true) {
+    BuyTrailingStop(Symbol(), TrailingStop, MinimumProfit, MagicNumber);
+    SellTrailingStop(Symbol(), TrailingStop, MinimumProfit, MagicNumber);   
+  }
+         
+  DrawStopLoss();
+  
+  if (Ask <= TriggerLow && !TradeExists() && CanTrade) { 
+        
+      BuyTicket = OrderSend(Symbol(), OP_BUY, LotSize, Ask, GetSlippage(Symbol(), Slippage), 0,
+        0, "Buy Order", MagicNumber, 0, Green);
+             
+      OrderSelect(BuyTicket, SELECT_BY_TICKET, MODE_TRADES);
+          
+      bool BuyStopMod = OrderModify(BuyTicket, OrderOpenPrice(), OrderOpenPrice() - (InitialStopLoss * PipPoint(Symbol())),
+        0, 0, clrMintCream);
+          
+      if (TakeProfit > 0) {
+        //OrderSelect(BuyTicket, SELECT_BY_TICKET, MODE_TRADES);
+          
+        bool BuyTakeProfitMod = OrderModify(BuyTicket, OrderOpenPrice(), OrderOpenPrice() - (InitialStopLoss * PipPoint(Symbol())),
+          OrderOpenPrice() + (TakeProfit * PipPoint(Symbol())), 0, clrLightGreen); 
+      } 
+      // if TP set to 0, then no TP is placed and the trade will close when SL is hit
+      else {
+        bool BuyTakeProfitMod = OrderModify(BuyTicket, OrderOpenPrice(), OrderOpenPrice() - (InitialStopLoss * PipPoint(Symbol())),
+          0, 0, clrLightGreen); 
+      }
+          
+      SellTicket = 0;
+  }
+   
+  if (Bid >= TriggerHigh && !TradeExists() && CanTrade) { 
+               
+      // place sell order
+      SellTicket = OrderSend(Symbol(), OP_SELL, LotSize, Bid, GetSlippage(Symbol(), Slippage), 0,
+        0, "Sell Order", MagicNumber, 0, Red);
+     
+      // select the just-placed order    
+      OrderSelect(SellTicket, SELECT_BY_TICKET, MODE_TRADES);
+      // set initial stop loss to InitialStopLoss
+      bool SellStopMod = OrderModify(SellTicket, OrderOpenPrice(), OrderOpenPrice() + (InitialStopLoss * PipPoint(Symbol())),
+        0, 0, clrOrange);
+          
+      if (TakeProfit > 0) {
+        //OrderSelect(SellTicket, SELECT_BY_TICKET, MODE_TRADES);       
+        bool SellTakeProfitMod = OrderModify(SellTicket, OrderOpenPrice(), OrderOpenPrice() + (InitialStopLoss * PipPoint(Symbol())),
+          OrderOpenPrice() - (TakeProfit * PipPoint(Symbol())), 0, clrYellow); 
+            
+      } 
+      // if TP set to 0, then no TP is placed and the trade will close when SL is hit
+      else {
+        
+        bool SellTakeProfitMod = OrderModify(SellTicket, OrderOpenPrice(), OrderOpenPrice() + (InitialStopLoss * PipPoint(Symbol())),
+          0, 0, clrYellow);    
+      }
+      BuyTicket = 0;    
+  }
+}
+//+---- End of Expert tick function --------------------------------------------------------------+
+
+//+-- Helper Functions --+
+// Pip Point function
+double PipPoint(string Currency) 
+  {
+    double CalcPoint;
+    int CalcDidgets = MarketInfo(Currency, MODE_DIGITS);
+    if (CalcDidgets == 2 || CalcDidgets == 3) CalcPoint = 0.01;
+    else if(CalcDidgets == 4 || CalcDidgets == 5) CalcPoint = 0.0001;
+    return(CalcPoint);
+  }
+  
+// Get Slippage function 
+int GetSlippage(string Currency, int SlippagePips) 
+  {
+    int CalcSlippage;
+    int CalcDigits = MarketInfo(Currency, MODE_DIGITS);
+    if (CalcDigits == 2 || CalcDigits == 4) CalcSlippage = SlippagePips;
+    else if (CalcDigits == 3 || CalcDigits == 5) CalcSlippage = SlippagePips * 10;
+    return (CalcSlippage);   
+  }
+
+// Is this a new bar
+bool NewBar() {
+  static datetime lastbar;
+  datetime curbar = Time[0];
+  if(lastbar!=curbar) {
+    lastbar=curbar;
+    return (true);
+  }
+  else {
+    return(false);
+  }
+}
+
+// check if order has been executed today (either live or closed)
+bool TradeExists()
+{
+   int TotalCurrentOrders = OrdersTotal();
+   if (TotalCurrentOrders > 0)
+   {
+      for (int count = TotalCurrentOrders-1 ; count >= 0; count--)
+      {
+         if (OrderSelect(count,SELECT_BY_POS))
+         {
+            if (OrderSymbol()==Symbol() && OrderMagicNumber() == MagicNumber)
+            {
+               Print("Trade is open: Not placing order");
+               return (true);
+            }
+         }
+      }
+   }
+   
+   int TotalHistoricalOrders = OrdersHistoryTotal();
+   if (TotalHistoricalOrders > 0)
+   {
+      for(int count = TotalHistoricalOrders-1; count >= 0; count--)
+      {
+         if(OrderSelect(count, SELECT_BY_POS, MODE_HISTORY))
+         {
+            if(OrderSymbol()==Symbol() && OrderMagicNumber() == MagicNumber)
+            {
+               // origional: if (OrderOpenTime() >= Time[0])
+               if (OrderOpenTime() >= iTime(Symbol(), PERIOD_D1, 0))
+               {
+                  Print("Trade was placed (and closed) on this candle");
+                  return (true);
+               }
+            }
+         }
+      }
+   }
+   return (false);
+}
+
+// update stoploss on buy orders
+void BuyTrailingStop(string argCurrency, int argTrailingStop, int argMinimumProfit, int argMagicNumber) {
+  // Trailing Stop for buy orders
+  int PositionIndex;    
+  int TotalNumberOfOrders;   
+  TotalNumberOfOrders = OrdersTotal();    
+
+  for(PositionIndex = TotalNumberOfOrders - 1; PositionIndex >= 0 ; PositionIndex --) {  
+    OrderSelect(PositionIndex, SELECT_BY_POS, MODE_TRADES);
+    
+    // Calculate Maximum Stop and Minimum Profit
+      
+    double MaxStopLoss = MarketInfo(argCurrency, MODE_BID) - (argTrailingStop * PipPoint(argCurrency));
+    MaxStopLoss = NormalizeDouble(MaxStopLoss, MarketInfo(argCurrency, MODE_DIGITS));
+      
+    double CurrentStop = NormalizeDouble(OrderStopLoss(), MarketInfo(OrderSymbol(), MODE_DIGITS));
+    
+    double PipsProfit = MarketInfo(argCurrency, MODE_BID) - OrderOpenPrice();
+    double MinProfit = argMinimumProfit * PipPoint(argCurrency);
+      
+    // Modify stop
+    if (OrderMagicNumber() == argMagicNumber && OrderSymbol() == argCurrency && OrderType() == OP_BUY
+        && (CurrentStop < MaxStopLoss || CurrentStop == 0) && PipsProfit >= MinProfit) {
+        
+      bool Trailed = OrderModify(OrderTicket(), OrderOpenPrice(), MaxStopLoss, OrderTakeProfit(), 0);
+      
+      // Error handling
+      if (Trailed == false) {
+        int ErrorCode = GetLastError();
+        string ErrDesc = ErrorDescription(ErrorCode);
+          
+        string ErrAlert = StringConcatenate("Buy trailing stop - Error ", ErrorCode, ": ", ErrDesc);
+        Alert(ErrAlert);
+          
+        string ErrLog = StringConcatenate("Bid: ", MarketInfo(argCurrency, MODE_BID), " Ticket: ", OrderTicket(), " Stop: ", OrderStopLoss(), " Trail: ", MaxStopLoss);
+        Print (ErrLog);
+      }
+    }
+  } //  end of For loop
+}
+
+// update trailing stop on sell orders
+void SellTrailingStop(string argCurrency, int argTrailingStop, int argMinimumProfit, int argMagicNumber) {
+  // Trailing Stop for buy orders
+  int PositionIndex;    
+  int TotalNumberOfOrders;   
+  TotalNumberOfOrders = OrdersTotal();    
+
+  for(PositionIndex = TotalNumberOfOrders - 1; PositionIndex >= 0 ; PositionIndex --) {  
+    OrderSelect(PositionIndex, SELECT_BY_POS, MODE_TRADES);
+    
+    // Calculate Maximum Stop and Minimum Profit
+      
+    double MaxStopLoss = MarketInfo(argCurrency, MODE_ASK) + (argTrailingStop * PipPoint(argCurrency));
+    MaxStopLoss = NormalizeDouble(MaxStopLoss, MarketInfo(argCurrency, MODE_DIGITS));
+      
+    double CurrentStop = NormalizeDouble(OrderStopLoss(), MarketInfo(OrderSymbol(), MODE_DIGITS));
+    
+    double PipsProfit = OrderOpenPrice() - MarketInfo(argCurrency, MODE_ASK);
+    double MinProfit = argMinimumProfit * PipPoint(argCurrency);
+      
+    // Modify stop
+    if (OrderMagicNumber() == argMagicNumber && OrderSymbol() == argCurrency && OrderType() == OP_SELL
+       && (CurrentStop > MaxStopLoss || CurrentStop == 0) && PipsProfit >= MinProfit) {
+        
+      bool Trailed = OrderModify(OrderTicket(), OrderOpenPrice(), MaxStopLoss, OrderTakeProfit(), 0);
+      
+      // Error handling
+      if (Trailed == false) {
+        int ErrorCode = GetLastError();
+        string ErrDesc = ErrorDescription(ErrorCode);
+          
+        string ErrAlert = StringConcatenate("Sell trailing stop - Error ", ErrorCode, ": ", ErrDesc);
+        Alert(ErrAlert);
+          
+        string ErrLog = StringConcatenate("Bid: ", MarketInfo(argCurrency, MODE_ASK), " Ticket: ", OrderTicket(), " Stop: ", OrderStopLoss(), " Trail: ", MaxStopLoss);
+        Print (ErrLog);
+      }
+    }
+  } //  end of For loop
+}
+
+void DrawStopLoss() {
+  // Mark the stop loss for all open orders
+  int PositionIndex;   
+  int TotalNumberOfOrders;   
+  TotalNumberOfOrders = OrdersTotal();   
+
+  // standard loop
+  for(PositionIndex = TotalNumberOfOrders - 1; PositionIndex >= 0 ; PositionIndex --) {  
+    // select each order 
+    OrderSelect(PositionIndex, SELECT_BY_POS, MODE_TRADES);
+    
+    // get current stop loss   
+    double CurrentStop = NormalizeDouble(OrderStopLoss(), MarketInfo(OrderSymbol(), MODE_DIGITS));
+    
+    // draw stop loss
+    ObjectCreate("TrailingStop",OBJ_HLINE,0,D'2004.02.20 12:30', CurrentStop);
+    ObjectSet("TrailingStop", OBJPROP_COLOR, clrRed);
+  } 
+}
+
+// Check if trading hours are allowed
+bool BetweenTradingHours(int argHourToStartTrading, int argHourToEndTrading) {
+  int currentHour = TimeHour(TimeCurrent());
+  if (currentHour >= argHourToStartTrading && currentHour < argHourToEndTrading) {
+   return (true);
+  }  
+  else {
+    return (false);
+  }
+  
+  
+}
